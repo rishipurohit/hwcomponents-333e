@@ -3,6 +3,7 @@ import math
 import glob
 import csv
 import os
+import fcntl
 import subprocess
 from typing import Callable, Optional
 from hwcomponents import ComponentModel, action
@@ -15,11 +16,17 @@ def _clean_tmp_dir():
         os.path.dirname(os.path.abspath(__file__)), "cacti_inputs_outputs"
     )
     os.makedirs(temp_dir, exist_ok=True)
-    # If there's more than 200 files in the directory, remove the oldest ones
-    files = sorted(glob.glob(temp_dir), key=os.path.getctime, reverse=True)
+    files = sorted(
+        [f for f in glob.glob(os.path.join(temp_dir, "*")) if not f.endswith(".lock")],
+        key=os.path.getctime,
+        reverse=True,
+    )
     if len(files) > 200:
         for file in files[200:]:
-            os.remove(file)
+            try:
+                os.remove(file)
+            except OSError:
+                pass
     return temp_dir
 
 
@@ -533,6 +540,7 @@ class _Memory(ComponentModel):
         input_path = os.path.join(temp_dir, input_name)
         output_path = os.path.join(temp_dir, input_name + "cacti.log")
         output_path_csv = os.path.join(temp_dir, input_name + ".out")
+        lock_path = os.path.join(temp_dir, input_name + ".lock")
 
         def read_csv_results(output_path_csv):
             with open(output_path_csv, "r") as f:
@@ -546,41 +554,47 @@ class _Memory(ComponentModel):
                     float(row[" Random cycle time (ns)"]) * 1e-9,
                 )
 
-        if os.path.exists(output_path_csv):
+        with open(lock_path, "w") as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
             try:
-                return read_csv_results(output_path_csv)
-            except Exception as e:
-                self.logger.warning(
-                    f"Error reading CACTI output file {output_path_csv}: {e}"
+                if os.path.exists(output_path_csv):
+                    try:
+                        return read_csv_results(output_path_csv)
+                    except Exception as e:
+                        self.logger.warning(
+                            f"Error reading CACTI output file {output_path_csv}: {e}"
+                        )
+                        pass
+
+                with open(input_path, "w") as f:
+                    f.write("".join(cfg))
+
+                self.logger.info(f"Calling CACTI with input path {input_path}")
+                self.logger.info(f"CACTI output will be written to {output_path}")
+
+                cacti_dir = _get_cacti_dir(self.logger)
+
+                exec_list = ["./cacti", "-infile", input_path]
+                self.logger.info(
+                    f"Calling: cd {cacti_dir} ; {' '.join(exec_list)} >> {output_path} 2>&1"
                 )
-                pass
+                with open(output_path, "w") as out:
+                    result = subprocess.call(
+                        exec_list,
+                        cwd=cacti_dir,
+                        stdout=out,
+                        stderr=subprocess.STDOUT,
+                    )
 
-        with open(input_path, "w") as f:
-            f.write("".join(cfg))
+                if result != 0 or not os.path.exists(output_path_csv):
+                    raise Exception(
+                        f"CACTI failed with exit code {result}. Please check {output_path} for CACTI output. "
+                        f"Run command: cd {cacti_dir} ; {' '.join(exec_list)} >> {output_path} 2>&1"
+                    )
 
-        self.logger.info(f"Calling CACTI with input path {input_path}")
-        self.logger.info(f"CACTI output will be written to {output_path}")
-
-        cacti_dir = _get_cacti_dir(self.logger)
-
-        exec_list = ["./cacti", "-infile", input_path]
-        self.logger.info(
-            f"Calling: cd {cacti_dir} ; {' '.join(exec_list)} >> {output_path} 2>&1"
-        )
-        result = subprocess.call(
-            exec_list,
-            cwd=cacti_dir,
-            stdout=open(output_path, "w"),
-            stderr=subprocess.STDOUT,
-        )
-
-        if result != 0 or not os.path.exists(output_path_csv):
-            raise Exception(
-                f"CACTI failed with exit code {result}. Please check {output_path} for CACTI output. "
-                f"Run command: cd {cacti_dir} ; {' '.join(exec_list)} >> {output_path} 2>&1"
-            )
-
-        return read_csv_results(output_path_csv)
+                return read_csv_results(output_path_csv)
+            finally:
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
 class SRAM(_Memory):
