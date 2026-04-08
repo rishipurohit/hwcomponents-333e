@@ -1,3 +1,6 @@
 [submodule "hwcomponents_cacti/cacti"]
 	path = hwcomponents_cacti/cacti
 	url = https://github.com/HewlettPackard/cacti.git
+[submodule "hwcomponents_cacti/destiny_3d_cache"]
+	path = hwcomponents_cacti/destiny_3d_cache
+	url = https://github.com/sparsh0mittal/destiny_3d_cache
