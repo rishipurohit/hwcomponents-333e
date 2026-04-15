@@ -8,39 +8,39 @@ This week, we focused on modeling the 333-eDRAM cache in Accelforge. Concretely,
 
 ## Baseline 3D eDRAM
 
-Total area of the design: 4.31e-06 m^2
+Total area of the design: 4.31e-06 m^2   
 Area breakdown per component:
-	MainMemory: 0.00e+00 m^2
-	GlobalBuffer: 7.17e-07 m^2
-	InputScratchpad: 1.18e-06 m^2
-	WeightScratchpad: 1.18e-06 m^2
-	OutputScratchpad: 1.18e-06 m^2
-	MAC: 6.49e-08 m^2
-Total leakage power of the design: 6.29e-01 W
-	MainMemory: 0.00e+00 W
-	GlobalBuffer: 6.83e-02 W
-	InputScratchpad: 1.87e-01 W
-	WeightScratchpad: 1.87e-01 W
-	OutputScratchpad: 1.87e-01 W
+	MainMemory: 0.00e+00 m^2   
+	GlobalBuffer: 7.17e-07 m^2   
+	InputScratchpad: 1.18e-06 m^2   
+	WeightScratchpad: 1.18e-06 m^2   
+	OutputScratchpad: 1.18e-06 m^2   
+	MAC: 6.49e-08 m^2   
+Total leakage power of the design: 6.29e-01 W   
+	MainMemory: 0.00e+00 W   
+	GlobalBuffer: 6.83e-02 W   
+	InputScratchpad: 1.87e-01 W   
+	WeightScratchpad: 1.87e-01 W   
+	OutputScratchpad: 1.87e-01 W   
 	MAC: 7.73e-04 W
 
 ## 333-eDRAM
 
-Total area of the design: 2.51e-06 m^2
+Total area of the design: 2.51e-06 m^2   
 Area breakdown per component:
-	MainMemory: 0.00e+00 m^2
-	GlobalBuffer: 4.29e-07 m^2
-	InputScratchpad: 6.72e-07 m^2
-	WeightScratchpad: 6.72e-07 m^2
-	OutputScratchpad: 6.72e-07 m^2
-	MAC: 6.49e-08 m^2
-Total leakage power of the design: 8.59e-02 W
-	MainMemory: 0.00e+00 W
-	GlobalBuffer: 1.77e-02 W
-	InputScratchpad: 2.25e-02 W
-	WeightScratchpad: 2.25e-02 W
-	OutputScratchpad: 2.25e-02 W
-	MAC: 7.73e-04 W
+	MainMemory: 0.00e+00 m^2   
+	GlobalBuffer: 4.29e-07 m^2   
+	InputScratchpad: 6.72e-07 m^2   
+	WeightScratchpad: 6.72e-07 m^2   
+	OutputScratchpad: 6.72e-07 m^2   
+	MAC: 6.49e-08 m^2   
+Total leakage power of the design: 8.59e-02 W   
+	MainMemory: 0.00e+00 W   
+	GlobalBuffer: 1.77e-02 W   
+	InputScratchpad: 2.25e-02 W   
+	WeightScratchpad: 2.25e-02 W   
+	OutputScratchpad: 2.25e-02 W    
+	MAC: 7.73e-04 W   
 
 3. Then, we moved on to creating a baseline configuration integrating our new 333-eDRAM component model in Accelforge, using the Eyeriss architecture as a reference (the tutorial was provided in the Accelforge repo). We replaced the use of SRAMs in the original Eyeriss architecture with our 333-eDRAM component model (and also a baseline 3D eDRAM model) to create two new configurations: `eyeriss_333.yaml` and `eyeriss_baseline.yaml`.
 
