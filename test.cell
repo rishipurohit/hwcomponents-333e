@@ -1,2 +1,15 @@
--MemCellType: DRAM
--CellArea (F^2): 33.1
+-MemCellType: eDRAM
+
+-CellArea (F^2): 837
+-CellAspectRatio: 2.39
+
+-ReadMode: voltage
+
+-AccessType: CMOS
+-AccessCMOSWidth (F): 1.31
+
+-DRAMCellCapacitance (F): 15e-15
+-ResetVoltage (V): vdd
+-SetVoltage (V): vdd
+
+-MinSenseVoltage (mV): 10

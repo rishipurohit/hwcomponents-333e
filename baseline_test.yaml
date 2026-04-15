@@ -1,6 +1,6 @@
 
 !Memory
-name: Standard_3D_GlobalBuffer
+name: Baseline3DGlobalBuffer
 component_class: EDRAM_3DCache
 size: 1048576  # 128 KB
 extra_attributes_for_component_model:

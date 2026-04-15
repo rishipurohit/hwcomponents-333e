@@ -1,6 +1,6 @@
 
 !Memory
-name: My333GlobalBuffer
+name: 333GlobalBuffer
 component_class: EDRAM333_Cache
 size: 1048576  # 128 KB
 extra_attributes_for_component_model:

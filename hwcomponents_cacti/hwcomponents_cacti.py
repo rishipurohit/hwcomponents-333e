@@ -5,6 +5,7 @@ import csv
 import os
 import fcntl
 import subprocess
+import re
 from typing import Callable, Optional
 from hwcomponents import ComponentModel, action
 import csv
@@ -50,7 +51,7 @@ class _DestinyMemory(ComponentModel):
         design_target: str = "RAM",
         mem_cell_type: str = "eDRAM",
         cell_area_f2: float = 33.1,
-        optimization_target: str = "ReadLatency",
+        optimization_target: str = "WriteEDP",
         additional_cfg: str = "",
         additional_cell: str = ""
     ):
@@ -90,32 +91,72 @@ class _DestinyMemory(ComponentModel):
         capacity_kb = max(self.capacity_bytes / 1024, 1)
         
         cfg_content = f"""
+-CacheAccessMode: Normal
+-Associativity (for cache only): 8
+
 -DesignTarget: {self.design_target}
 -ProcessNode: {sn}
 -Capacity (KB): {int(capacity_kb)}
 -WordWidth (bit): {self.width_bits}
 
+-DeviceRoadmap: HP
+
+-LocalWireType: LocalAggressive
+-LocalWireRepeaterType: RepeatedNone
+-LocalWireUseLowSwing: No
+
+-GlobalWireType: GlobalAggressive
+-GlobalWireRepeaterType: RepeatedNone
+-GlobalWireUseLowSwing: No
+
+-Routing: H-tree
+
+-InternalSensing: true
+
 -MemoryCellInputFile: temp_destiny.cell
 
--OptimizationTarget: {self.optimization_target}
 -Temperature (K): 300
+-RetentionTime (us): 40
+
+-OptimizationTarget: WriteEDP
+
+-EnablePruning: Yes
+
+-BufferDesignOptimization: latency
+
+-StackedDieCount: 1
 {self.additional_cfg}
 """
+        
         cell_content = f"""
 -MemCellType: {self.mem_cell_type}
 -CellArea (F^2): {self.cell_area_f2}
-{self.additional_cell}
+
+-CellAspectRatio: 2.39
+
+-ReadMode: voltage
+
+-CellAspectRatio: 2.39
+
+-ReadMode: voltage
+
+-AccessType: CMOS
+-AccessCMOSWidth (F): 1.31
+
+// value from paper
+-DRAMCellCapacitance (F): 180e-18
+-ResetVoltage (V): vdd
+-SetVoltage (V): vdd
+
+-MinSenseVoltage (mV): 10
 """
         temp_dir = _clean_tmp_dir()
-        import hashlib
         input_name = hashlib.sha256((cfg_content + cell_content).encode()).hexdigest()
         
         cfg_path = os.path.join(temp_dir, input_name + ".cfg")
         cell_path = os.path.join(temp_dir, "temp_destiny.cell")
         out_path = os.path.join(temp_dir, input_name + "_out.log")
         
-        import subprocess
-        import re
         try:
             with open(cfg_path, "w") as f:
                 f.write(cfg_content.strip() + "\n")
@@ -202,7 +243,7 @@ class _DRAM(_DestinyMemory):
     def __init__(
         self,
         size: int,
-        width: int,
+        width: int = 128,
         type: str = "DRAM",
         tech_node: float = 22e-9
     ):
@@ -286,71 +327,6 @@ class HBM4(_DRAM):
         self.write_energy = self.read_energy
         self.read_latency = 1.0 / (8 * 8 * 1024 * 1024 * 1024)
         self.write_latency = self.read_latency
-
-class EDRAM(_DestinyMemory):
-    component_name = ["EDRAM", "eDRAM"]
-    priority = 0.3
-
-    def __init__(self, size: int, width: int, tech_node: float = 22e-9, cell_area_f2: float = 33.1, additional_cfg: str = "", additional_cell: str = ""):
-        capacity_bytes = size // 8
-        super().__init__(
-            tech_node=tech_node,
-            capacity_bytes=capacity_bytes,
-            width_bits=width,
-            design_target="RAM",
-            mem_cell_type="eDRAM",
-            cell_area_f2=cell_area_f2,
-            optimization_target="ReadLatency",
-            additional_cfg=additional_cfg,
-            additional_cell=additional_cell
-        )
-        self.width = width
-
-    @action(bits_per_action="width")
-    def read(self) -> tuple[float, float]:
-        return self.read_energy, self.read_latency
-
-    @action(bits_per_action="width")
-    def write(self) -> tuple[float, float]:
-        return self.write_energy, self.write_latency
-
-class EDRAM_333(EDRAM):
-    component_name = ["EDRAM333", "EDRAM_333", "333EDRAM"]
-    def __init__(self, size: int, width: int, tech_node: float = 7e-9):
-        super().__init__(
-            size=size,
-            width=width,
-            tech_node=tech_node,
-            cell_area_f2=33.1,
-            additional_cfg="\n-StackedDieCount: 1\n"
-        )
-
-    def _customize_destiny_outputs(self):
-        # Incorporate paper-specific values from Table III and Table II
-        # 333-eDRAM uses IGZO for low leakage (I_OFF ~10^-21 A/um),
-        # CNFET for fast read (I_ON ~10^-4 A/um), and Si CMOS for write/peripherals.
-        
-        # Scaling against baseline Si eDRAM (from Table III):
-        # Read Latency (RWL to SA Delay @ VSN=0.5 V): 489 ps vs 793 ps
-        self.read_latency *= (489.0 / 793.0)
-        
-        # Write Latency (WWL to 95% VSN Delay): 251 ps vs 328 ps
-        self.write_latency *= (251.0 / 328.0)
-        
-        # Energy per cycle (Memory): 13.6 pJ vs 21.3 pJ
-        self.read_energy *= (13.6 / 21.3)
-        self.write_energy *= (13.6 / 21.3)
-        
-        # Area (64 kB Memory Area): 0.025 mm^2 vs 0.068 mm^2
-        # Monolithic 3D integration puts memory cells above peripherals
-        self.destiny_area *= (0.025 / 0.068)
-        
-        # Leakage power / Retention Time:
-        # Retention time is 501 us vs 51.3 us (Table III) due to IGZO's ultra low I_OFF.
-        # Leakage is primarily limited by the Si CMOS peripheral circuits now.
-        # We scale leakage proportionally to the reduction in peripheral size (dominated by area efficiency)
-        # combined with the total capacitance reduction and ultra-low leakage path off-state.
-        self.destiny_leak_power *= (51.3 / 501.0)
 
 
 
@@ -873,49 +849,17 @@ class EDRAM_3DCache(_DestinyMemory):
     component_name = ["EDRAM_3DCache", "3D_eDRAM"]
     priority = 0.8
 
-    def __init__(self, size: int, width: int, tech_node: float = 32e-9):
+    def __init__(self, size: int, width: int = 128, tech_node: float = 32e-9):
         capacity_bytes = size // 8
 
-        # Pack all the custom .cell parameters you found
-        custom_cell = '''
--CellAspectRatio: 2.39
--ReadMode: voltage
--AccessType: CMOS
--AccessCMOSWidth (F): 1.31
--DRAMCellCapacitance (F): 15e-15
--ResetVoltage (V): vdd
--SetVoltage (V): vdd
--MinSenseVoltage (mV): 10
-'''
-        # Pack all the custom .cfg parameters for 3D Cache
-        custom_cfg = '''
--CacheAccessMode: Normal
--Associativity (for cache only): 8
--DeviceRoadmap: HP
--LocalWireType: LocalAggressive
--LocalWireRepeaterType: RepeatedNone
--LocalWireUseLowSwing: No
--GlobalWireType: GlobalAggressive
--GlobalWireRepeaterType: RepeatedNone
--GlobalWireUseLowSwing: No
--Routing: Non-H-tree
--InternalSensing: true
--Temperature (K): 380
--RetentionTime (us): 40
--EnablePruning: Yes
--BufferDesignOptimization: latency
--StackedDieCount: 2
-'''
         super().__init__(
             tech_node=tech_node,
             capacity_bytes=capacity_bytes,
             width_bits=width,
-            design_target="cache",          # Targeted as a Cache instead of RAM!
+            design_target="cache",
             mem_cell_type="eDRAM",
-            cell_area_f2=38.1,              # Updated to your 38.1 F^2
-            optimization_target="WriteEDP", 
-            additional_cfg=custom_cfg,
-            additional_cell=custom_cell
+            cell_area_f2=837,
+            optimization_target="WriteEDP"
         )
         self.width = width
 
@@ -927,36 +871,24 @@ class EDRAM_3DCache(_DestinyMemory):
     def write(self) -> tuple[float, float]:
         return self.write_energy, self.write_latency
 
-# Add the new class to the __init__.py export list so Jupyter can see it
-
 class EDRAM_333_Cache(_DestinyMemory):
     component_name = ["EDRAM333_Cache", "333EDRAM_Cache"]
     priority = 0.9
 
-    def __init__(self, size: int, width: int, tech_node: float = 7e-9):
+    def __init__(self, size: int, width: int = 128, tech_node: float = 7e-9):
         capacity_bytes = size // 8
 
-        # We use your stable Cache configs to get a standard Si-eDRAM baseline
-        custom_cfg = '''
--CacheAccessMode: Normal
--Associativity (for cache only): 8
--Routing: Non-H-tree
--InternalSensing: true
--Temperature (K): 300
--RetentionTime (us): 40
--EnablePruning: Yes
--BufferDesignOptimization: latency
--StackedDieCount: 1
-'''
+        # Standard Si-eDRAM baseline
+
         super().__init__(
             tech_node=tech_node,
             capacity_bytes=capacity_bytes,
             width_bits=width,
-            design_target="cache",             # Fixed: Targeted as Cache
+            design_target="cache",             
             mem_cell_type="eDRAM",
-            cell_area_f2=33.1,                 # Fixed: Stable baseline cell area
-            optimization_target="ReadLatency", # Fixed: Relaxed optimization
-            additional_cfg=custom_cfg
+            cell_area_f2=388,                 
+            optimization_target="WriteEDP",
+            additional_cfg="-MonolithicStackCount:3"
         )
         self.width = width
 
@@ -969,19 +901,9 @@ class EDRAM_333_Cache(_DestinyMemory):
         return self.write_energy, self.write_latency
 
     def _customize_destiny_outputs(self):
-        # Failsafe bypass (just in case DESTINY still complains about the capacity)
-        if self.destiny_area == 0:
-            self.read_latency = 793e-12
-            self.write_latency = 328e-12
-            self.read_energy = 21.3e-12
-            self.write_energy = 21.3e-12
-            self.destiny_area = 0.068e-6
-            self.destiny_leak_power = 0.01
-
         # 333-eDRAM Monolithic 3D Scaling Math (from Table III)
         self.read_latency *= (489.0 / 793.0)
         self.write_latency *= (251.0 / 328.0)
         self.read_energy *= (13.6 / 21.3)
         self.write_energy *= (13.6 / 21.3)
-        self.destiny_area *= (0.025 / 0.068)     # Area shrinks because cells are stacked above logic!
         self.destiny_leak_power *= (51.3 / 501.0)
