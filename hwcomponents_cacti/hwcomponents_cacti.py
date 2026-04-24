@@ -10,6 +10,7 @@ from typing import Callable, Optional
 from hwcomponents import ComponentModel, action
 import csv
 import hashlib
+import yaml as _yaml
 
 
 def _clean_tmp_dir():
@@ -37,6 +38,246 @@ def _get_cacti_dir(logger: Logger) -> str:
         if os.path.exists(p) and os.path.isfile(p):
             return os.path.dirname(os.path.abspath(p))
     raise FileNotFoundError("CACTI executable not found")
+
+
+def _get_msxac_dir(logger: Logger) -> str:
+    """
+    Locate the MemSysExplorer ArrayCharacterization directory (containing the `msxac`
+    binary, `sample_configs/`, and `sample_cells/`). Checked in order:
+      1. $MSX_AC_DIR
+      2. A few likely sibling layouts relative to this file.
+    """
+    env = os.environ.get("MSX_AC_DIR")
+    if env and os.path.isdir(env):
+        return os.path.abspath(env)
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(here, "..", "..", "MemSysExplorer", "tech", "ArrayCharacterization"),
+        os.path.join(here, "..", "..", "..", "MemSysExplorer", "tech", "ArrayCharacterization"),
+        os.path.join(here, "..", "MemSysExplorer", "tech", "ArrayCharacterization"),
+    ]
+    for c in candidates:
+        if os.path.isdir(c):
+            return os.path.abspath(c)
+    raise FileNotFoundError(
+        "Could not locate MemSysExplorer's ArrayCharacterization directory. "
+        "Set the MSX_AC_DIR environment variable to point at it."
+    )
+
+
+class _MSXACMemory(ComponentModel):
+    """
+    Base class for memory models that call MemSysExplorer's ArrayCharacterization
+    tool (`msxac`, the NVSim/DESTINY-extended characterizer) instead of DESTINY.
+
+    DESTINY only supports 1T1C eDRAM cells, which is insufficient for modeling the
+    3T eDRAM / 333-eDRAM devices targeted by this plug-in. msxac natively supports
+    3T eDRAM cells with mixed-Vt, mixed-device-type peripherals / read path /
+    write path configurations.
+
+    The tool is invoked once per unique (cell, tech, capacity, ...) combination;
+    a tech YAML is written into a temp subdirectory of the AC dir and the result
+    YAML path is parsed out of msxac's stdout.
+    """
+
+    def __init__(
+        self,
+        tech_node: float,
+        capacity_bytes: int,
+        width_bits: int,
+        cell_file: str,
+        design_target: str = "cache",
+        optimization_target: str = "WriteEDP",
+        process_node: Optional[int] = None,
+        device_roadmap: str = "HP",
+        process_node_r: Optional[int] = None,
+        device_roadmap_r: Optional[str] = None,
+        process_node_w: Optional[int] = None,
+        device_roadmap_w: Optional[str] = None,
+        associativity: int = 8,
+        temperature: int = 300,
+        retention_time_us: int = 40,
+    ):
+        self.tech_node = float(tech_node) * 1e9  # nm
+        self.capacity_bytes = capacity_bytes
+        self.width_bits = width_bits
+        self.cell_file = cell_file
+        self.design_target = design_target
+        self.optimization_target = optimization_target
+        self.process_node = (
+            int(process_node) if process_node is not None else max(7, int(self.tech_node))
+        )
+        self.device_roadmap = device_roadmap
+        self.process_node_r = process_node_r
+        self.device_roadmap_r = device_roadmap_r
+        self.process_node_w = process_node_w
+        self.device_roadmap_w = device_roadmap_w
+        self.associativity = associativity
+        self.temperature = temperature
+        self.retention_time_us = retention_time_us
+
+        self.read_energy: float = None
+        self.write_energy: float = None
+        self.destiny_leak_power: float = None
+        self.destiny_area: float = None
+        self.read_latency: float = None
+        self.write_latency: float = None
+
+        self._called_msxac = False
+        self._call_msxac()
+
+        self._customize_destiny_outputs()
+
+        super().__init__(area=self.destiny_area, leak_power=self.destiny_leak_power)
+
+    def _customize_destiny_outputs(self):
+        """Hook for subclasses to tweak msxac outputs (e.g., monolithic 3D scaling)."""
+        pass
+
+    def _call_msxac(self):
+        if self._called_msxac:
+            return
+        self._called_msxac = True
+
+        ac_dir = _get_msxac_dir(self.logger)
+        msxac_exec = os.path.join(ac_dir, "msxac")
+        if not os.path.exists(msxac_exec):
+            raise FileNotFoundError(
+                f"msxac binary not found at {msxac_exec}. Build it with `make` in the "
+                f"MemSysExplorer ArrayCharacterization directory, or set MSX_AC_DIR."
+            )
+
+        # Pick capacity unit that msxac accepts (KB or MB).
+        capacity_kb = max(self.capacity_bytes // 1024, 1)
+        if capacity_kb >= 1024 and capacity_kb % 1024 == 0:
+            cap_value = int(capacity_kb // 1024)
+            cap_unit = "MB"
+        else:
+            cap_value = int(capacity_kb)
+            cap_unit = "KB"
+
+        tech_cfg = {
+            "MemoryCellInputFile": self.cell_file,
+            "ProcessNode": self.process_node,
+            "DeviceRoadmap": self.device_roadmap,
+        }
+        if self.process_node_r is not None:
+            tech_cfg["ProcessNodeR"] = int(self.process_node_r)
+            tech_cfg["DeviceRoadmapR"] = self.device_roadmap_r or "HP"
+        if self.process_node_w is not None:
+            tech_cfg["ProcessNodeW"] = int(self.process_node_w)
+            tech_cfg["DeviceRoadmapW"] = self.device_roadmap_w or "HP"
+
+        tech_cfg.update({
+            "DesignTarget": self.design_target,
+            "OptimizationTarget": self.optimization_target,
+            "EnablePruning": "Yes",
+            "Capacity": {"Value": cap_value, "Unit": cap_unit},
+            "WordWidth": self.width_bits,
+            "LocalWire": {
+                "Type": "LocalAggressive",
+                "RepeaterType": "RepeatedNone",
+                "UseLowSwing": "No",
+            },
+            "GlobalWire": {
+                "Type": "GlobalAggressive",
+                "RepeaterType": "RepeatedNone",
+                "UseLowSwing": "No",
+            },
+            "Routing": "H-tree",
+            "InternalSensing": True,
+            "Temperature": self.temperature,
+            "RetentionTime": self.retention_time_us,
+            "BufferDesignOptimization": "latency",
+        })
+        if self.design_target == "cache":
+            tech_cfg["CacheAccessMode"] = "Normal"
+            tech_cfg["Associativity"] = self.associativity
+
+        # Hash a preliminary dump to get a deterministic output prefix.
+        prelim = _yaml.safe_dump(tech_cfg, sort_keys=False)
+        input_name = "hwc_" + hashlib.sha256(prelim.encode()).hexdigest()[:16]
+        tech_cfg["OutputFilePrefix"] = input_name
+
+        cfg_text = _yaml.safe_dump(tech_cfg, sort_keys=False)
+
+        # Write the tech YAML under ac_dir so relative cell paths resolve correctly.
+        tmp_dir = os.path.join(ac_dir, "hwc_tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+        tech_yaml_path = os.path.join(tmp_dir, input_name + ".yaml")
+        log_path = os.path.join(tmp_dir, input_name + "_msxac.log")
+        with open(tech_yaml_path, "w") as f:
+            f.write(cfg_text)
+
+        self.logger.info(f"Running msxac on {tech_yaml_path}")
+
+        try:
+            with open(log_path, "w") as out:
+                rc = subprocess.call(
+                    ["./msxac", tech_yaml_path],
+                    cwd=ac_dir,
+                    stdout=out,
+                    stderr=subprocess.STDOUT,
+                )
+            with open(log_path, "r") as out:
+                stdout = out.read()
+
+            match = re.search(r"Results written to ([^\s]+\.yaml)", stdout)
+            if not match:
+                raise Exception(
+                    f"msxac (rc={rc}) did not emit a result YAML path. "
+                    f"See {log_path} for full output."
+                )
+            result_yaml = match.group(1)
+            if not os.path.isabs(result_yaml):
+                result_yaml = os.path.join(ac_dir, result_yaml)
+            with open(result_yaml, "r") as f:
+                result = _yaml.safe_load(f)
+
+            if "CacheDesign" in result:
+                cache = result["CacheDesign"]
+                self.destiny_area = float(cache["Area"]["Total_mm2"]) * 1e-6  # mm^2 -> m^2
+                self.read_latency = float(cache["Timing"]["CacheHitLatency_ns"]) * 1e-9
+                self.write_latency = float(cache["Timing"]["CacheWriteLatency_ns"]) * 1e-9
+                self.read_energy = float(cache["Power"]["CacheHitDynamicEnergy_nJ"]) * 1e-9
+                self.write_energy = float(cache["Power"]["CacheWriteDynamicEnergy_nJ"]) * 1e-9
+                self.destiny_leak_power = float(cache["Power"]["CacheTotalLeakagePower_mW"]) * 1e-3
+            elif "Results" in result:
+                res = result["Results"]
+                self.destiny_area = float(res["Area"]["Total"]["Area_mm2"]) * 1e-6
+                self.read_latency = float(res["Timing"]["Read"]["Latency_ns"]) * 1e-9
+                self.read_energy = float(res["Power"]["Read"]["DynamicEnergy_pJ"]) * 1e-12
+                self.destiny_leak_power = float(res["Power"]["Leakage_mW"]) * 1e-3
+                if "Write" in res["Timing"]:
+                    self.write_latency = float(res["Timing"]["Write"]["Latency_ns"]) * 1e-9
+                    self.write_energy = float(res["Power"]["Write"]["DynamicEnergy_pJ"]) * 1e-12
+                elif "Set" in res["Timing"]:
+                    self.write_latency = float(res["Timing"]["Set"]["Latency_ns"]) * 1e-9
+                    self.write_energy = float(res["Power"]["Set"]["DynamicEnergy_pJ"]) * 1e-12
+            else:
+                raise Exception(
+                    f"Unrecognised msxac result YAML schema in {result_yaml}"
+                )
+
+            self.logger.info(
+                f"msxac returned area={self.destiny_area} m^2, "
+                f"read_lat={self.read_latency}s, write_lat={self.write_latency}s, "
+                f"read_eng={self.read_energy}J, write_eng={self.write_energy}J, "
+                f"leak={self.destiny_leak_power}W"
+            )
+
+        except Exception as e:
+            self.logger.warning(f"Error calling msxac: {e}")
+            for attr in (
+                "read_energy",
+                "write_energy",
+                "destiny_leak_power",
+                "destiny_area",
+                "read_latency",
+                "write_latency",
+            ):
+                if getattr(self, attr) is None:
+                    setattr(self, attr, 0.0)
 
 
 class _DestinyMemory(ComponentModel):
@@ -845,21 +1086,34 @@ class Cache(_Memory):
         self._interpolate_and_call_cacti()
         return self.write_energy, self._get_latency_per_bit() * self.width
 
-class EDRAM_3DCache(_DestinyMemory):
+class EDRAM_3DCache(_MSXACMemory):
+    """
+    Standard 3T eDRAM cache modelled via MemSysExplorer's msxac (NVSim-extended).
+
+    DESTINY, which this plug-in previously used, only ships a 1T1C eDRAM cell. The
+    targets of this plug-in are 3T eDRAMs, so we invoke msxac with the calibrated
+    3T eDRAM cell from MemSysExplorer's sample_cells/sample_edram3ts/.
+    """
     component_name = ["EDRAM_3DCache", "3D_eDRAM"]
     priority = 0.8
 
-    def __init__(self, size: int, width: int = 128, tech_node: float = 32e-9):
+    def __init__(self, size: int, width: int = 128, tech_node: float = 28e-9):
         capacity_bytes = size // 8
 
         super().__init__(
             tech_node=tech_node,
             capacity_bytes=capacity_bytes,
             width_bits=width,
+            cell_file="sample_cells/sample_edram3ts/sample_eDRAM3T_28nm_cell.yaml",
             design_target="cache",
-            mem_cell_type="eDRAM",
-            cell_area_f2=837,
-            optimization_target="WriteEDP"
+            optimization_target="WriteEDP",
+            process_node=28,
+            device_roadmap="HP",
+            process_node_r=28,
+            device_roadmap_r="HP",
+            process_node_w=28,
+            device_roadmap_w="LOP",
+            associativity=8,
         )
         self.width = width
 
@@ -871,24 +1125,37 @@ class EDRAM_3DCache(_DestinyMemory):
     def write(self) -> tuple[float, float]:
         return self.write_energy, self.write_latency
 
-class EDRAM_333_Cache(_DestinyMemory):
+class EDRAM_333_Cache(_MSXACMemory):
+    """
+    333-eDRAM cache (monolithic 3D integration of 3 transistor types: 7nm LOP Si
+    peripherals, 22nm CNFET read path, 45nm IGZO write path) modelled via msxac.
+
+    The 333-eDRAM cell parameters are taken from MemSysExplorer's calibrated
+    sample_cells/sample_edram3t_333/. Because msxac natively handles the mixed
+    device stack (via ProcessNodeR/W + DeviceRoadmapR/W), we no longer need the
+    post-hoc Table III scaling that the DESTINY-based version applied.
+    """
     component_name = ["EDRAM333_Cache", "333EDRAM_Cache"]
     priority = 0.9
 
     def __init__(self, size: int, width: int = 128, tech_node: float = 7e-9):
         capacity_bytes = size // 8
 
-        # Standard Si-eDRAM baseline
-
         super().__init__(
             tech_node=tech_node,
             capacity_bytes=capacity_bytes,
             width_bits=width,
-            design_target="cache",             
-            mem_cell_type="eDRAM",
-            cell_area_f2=388,                 
+            cell_file="sample_cells/sample_edram3t_333/sample_eDRAM3T_333eDRAM_cell.yaml",
+            design_target="cache",
             optimization_target="WriteEDP",
-            additional_cfg="-MonolithicStackCount:3"
+            process_node=7,
+            device_roadmap="LOP",
+            process_node_r=22,
+            device_roadmap_r="CNT",
+            process_node_w=45,
+            device_roadmap_w="IGZO",
+            associativity=8,
+            retention_time_us=501,
         )
         self.width = width
 
@@ -899,11 +1166,3 @@ class EDRAM_333_Cache(_DestinyMemory):
     @action(bits_per_action="width")
     def write(self) -> tuple[float, float]:
         return self.write_energy, self.write_latency
-
-    def _customize_destiny_outputs(self):
-        # 333-eDRAM Monolithic 3D Scaling Math (from Table III)
-        self.read_latency *= (489.0 / 793.0)
-        self.write_latency *= (251.0 / 328.0)
-        self.read_energy *= (13.6 / 21.3)
-        self.write_energy *= (13.6 / 21.3)
-        self.destiny_leak_power *= (51.3 / 501.0)
