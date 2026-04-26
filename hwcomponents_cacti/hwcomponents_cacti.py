@@ -611,9 +611,16 @@ class _Memory(ComponentModel):
                         return read_csv_results(output_path_csv)
                     except Exception as e:
                         self.logger.warning(
-                            f"Error reading CACTI output file {output_path_csv}: {e}"
+                            f"Error reading CACTI output file {output_path_csv}: {e}. "
+                            f"Deleting stale cache and rerunning CACTI."
                         )
-                        pass
+                        # CACTI opens its output file in append mode, so a stale
+                        # cache error in cache would survive the re-run. Remove
+                        # it first.
+                        try:
+                            os.remove(output_path_csv)
+                        except OSError:
+                            pass
 
                 with open(input_path, "w") as f:
                     f.write("".join(cfg))
