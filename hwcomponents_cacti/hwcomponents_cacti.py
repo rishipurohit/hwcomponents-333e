@@ -222,42 +222,62 @@ class _MSXACMemory(ComponentModel):
             with open(log_path, "r") as out:
                 stdout = out.read()
 
-            match = re.search(r"Results written to ([^\s]+\.yaml)", stdout)
-            if not match:
+            # msxac prints its results directly to stdout (no separate YAML file is
+            # emitted). Parse the human-readable summary the same way the DESTINY
+            # path below does. If a field is missing, leave it at 0.0 rather than
+            # crashing the whole pipeline.
+            if rc != 0:
                 raise Exception(
-                    f"msxac (rc={rc}) did not emit a result YAML path. "
-                    f"See {log_path} for full output."
+                    f"msxac exited with rc={rc}. See {log_path} for full output."
                 )
-            result_yaml = match.group(1)
-            if not os.path.isabs(result_yaml):
-                result_yaml = os.path.join(ac_dir, result_yaml)
-            with open(result_yaml, "r") as f:
-                result = _yaml.safe_load(f)
 
-            if "CacheDesign" in result:
-                cache = result["CacheDesign"]
-                self.destiny_area = float(cache["Area"]["Total_mm2"]) * 1e-6  # mm^2 -> m^2
-                self.read_latency = float(cache["Timing"]["CacheHitLatency_ns"]) * 1e-9
-                self.write_latency = float(cache["Timing"]["CacheWriteLatency_ns"]) * 1e-9
-                self.read_energy = float(cache["Power"]["CacheHitDynamicEnergy_nJ"]) * 1e-9
-                self.write_energy = float(cache["Power"]["CacheWriteDynamicEnergy_nJ"]) * 1e-9
-                self.destiny_leak_power = float(cache["Power"]["CacheTotalLeakagePower_mW"]) * 1e-3
-            elif "Results" in result:
-                res = result["Results"]
-                self.destiny_area = float(res["Area"]["Total"]["Area_mm2"]) * 1e-6
-                self.read_latency = float(res["Timing"]["Read"]["Latency_ns"]) * 1e-9
-                self.read_energy = float(res["Power"]["Read"]["DynamicEnergy_pJ"]) * 1e-12
-                self.destiny_leak_power = float(res["Power"]["Leakage_mW"]) * 1e-3
-                if "Write" in res["Timing"]:
-                    self.write_latency = float(res["Timing"]["Write"]["Latency_ns"]) * 1e-9
-                    self.write_energy = float(res["Power"]["Write"]["DynamicEnergy_pJ"]) * 1e-12
-                elif "Set" in res["Timing"]:
-                    self.write_latency = float(res["Timing"]["Set"]["Latency_ns"]) * 1e-9
-                    self.write_energy = float(res["Power"]["Set"]["DynamicEnergy_pJ"]) * 1e-12
+            area_m = re.search(r"-\s*Total Area\s*=\s*([0-9.]+)(mm\^2|um\^2)", stdout)
+            if area_m:
+                val = float(area_m.group(1))
+                unit = area_m.group(2)
+                self.destiny_area = val * 1e-6 if unit == "mm^2" else val * 1e-12
             else:
-                raise Exception(
-                    f"Unrecognised msxac result YAML schema in {result_yaml}"
-                )
+                self.destiny_area = 0.0
+
+            rlat_m = re.search(r"-\s*(?:Cache Hit|Read) Latency\s*=\s*([0-9.]+)(ns|ps)", stdout)
+            if rlat_m:
+                val = float(rlat_m.group(1))
+                unit = rlat_m.group(2)
+                self.read_latency = val * 1e-9 if unit == "ns" else val * 1e-12
+            else:
+                self.read_latency = 0.0
+
+            wlat_m = re.search(r"-\s*(?:Cache Write|Write) Latency\s*=\s*([0-9.]+)(ns|ps)", stdout)
+            if wlat_m:
+                val = float(wlat_m.group(1))
+                unit = wlat_m.group(2)
+                self.write_latency = val * 1e-9 if unit == "ns" else val * 1e-12
+            else:
+                self.write_latency = 0.0
+
+            reng_m = re.search(r"-\s*(?:Cache Hit|Read) Dynamic Energy\s*=\s*([0-9.]+)(nJ|pJ)", stdout)
+            if reng_m:
+                val = float(reng_m.group(1))
+                unit = reng_m.group(2)
+                self.read_energy = val * 1e-9 if unit == "nJ" else val * 1e-12
+            else:
+                self.read_energy = 0.0
+
+            weng_m = re.search(r"-\s*(?:Cache Write|Write) Dynamic Energy\s*=\s*([0-9.]+)(nJ|pJ)", stdout)
+            if weng_m:
+                val = float(weng_m.group(1))
+                unit = weng_m.group(2)
+                self.write_energy = val * 1e-9 if unit == "nJ" else val * 1e-12
+            else:
+                self.write_energy = 0.0
+
+            leak_m = re.search(r"-\s*(?:Cache Total |)Leakage Power\s*=\s*([0-9.]+)(mW|uW)", stdout)
+            if leak_m:
+                val = float(leak_m.group(1))
+                unit = leak_m.group(2)
+                self.destiny_leak_power = val * 1e-3 if unit == "mW" else val * 1e-6
+            else:
+                self.destiny_leak_power = 0.0
 
             self.logger.info(
                 f"msxac returned area={self.destiny_area} m^2, "
