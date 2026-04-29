@@ -1,0 +1,40 @@
+MemoryCellInputFile: sample_cells/sample_edram3t_333/sample_eDRAM3T_333eDRAM_cell.yaml
+
+ProcessNode: 22
+DeviceRoadmap: LOP
+
+ProcessNodeR: 22
+DeviceRoadmapR: CNT
+
+ProcessNodeW: 45
+DeviceRoadmapW: IGZO
+
+DesignTarget: cache
+
+CacheAccessMode: Normal
+Associativity: 8  # for cache only
+
+OptimizationTarget: ReadDynamicEnergy
+
+OutputFilePrefix: test
+EnablePruning: Yes
+
+WordWidth: 128  # bits
+
+LocalWire:
+  Type: LocalAggressive
+  RepeaterType: RepeatedNone
+  UseLowSwing: No
+
+GlobalWire:
+  Type: GlobalAggressive
+  RepeaterType: RepeatedNone
+  UseLowSwing: No
+
+Routing: H-tree
+
+InternalSensing: true
+
+Temperature: 300  # Kelvin
+
+BufferDesignOptimization: latency

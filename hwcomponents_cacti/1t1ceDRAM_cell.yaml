@@ -1,0 +1,21 @@
+# Cell Calibrated from:
+# Wang, Yih, et al. 
+# "Retention time optimization for eDRAM in 22nm tri-gate CMOS technology."
+# IEEE International Electron Devices Meeting. IEEE, 2013.
+
+MemCellType: eDRAM
+
+CellArea_F2: 59.92
+CellAspectRatio: 1.6
+
+ReadMode: voltage
+
+AccessType: CMOS
+AccessCMOSWidth_F: 1.0
+
+DRAMCellCapacitance_F: 13e-15
+
+MinSenseVoltage_mV: 10
+MaxStorageNodeDrop_V: 0.4
+
+RetentionTime_us: 100

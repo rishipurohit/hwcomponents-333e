@@ -1,0 +1,34 @@
+MemoryCellInputFile: sample_cells/sample_edram1ts/sample_eDRAM1T_22nm_cell.yaml
+
+ProcessNode: 22
+DeviceRoadmap: LOP
+
+DesignTarget: cache
+
+CacheAccessMode: Normal
+Associativity: 8  # for cache only
+
+OptimizationTarget: WriteEDP
+
+OutputFilePrefix: test
+EnablePruning: Yes
+
+WordWidth: 128  # bits
+
+LocalWire:
+  Type: LocalAggressive
+  RepeaterType: RepeatedNone
+  UseLowSwing: No
+
+GlobalWire:
+  Type: GlobalAggressive
+  RepeaterType: RepeatedNone
+  UseLowSwing: No
+
+Routing: H-tree
+
+InternalSensing: true
+
+Temperature: 300  # Kelvin
+
+BufferDesignOptimization: latency

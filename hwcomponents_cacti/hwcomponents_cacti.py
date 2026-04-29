@@ -10,6 +10,7 @@ from typing import Callable, Optional
 from hwcomponents import ComponentModel, action
 import csv
 import hashlib
+import shutil
 
 
 def _clean_tmp_dir():
@@ -38,226 +39,218 @@ def _get_cacti_dir(logger: Logger) -> str:
             return os.path.dirname(os.path.abspath(p))
     raise FileNotFoundError("CACTI executable not found")
 
+def _get_msxac_dir(logger: Logger) -> str:
+    """
+    Locate the MemSysExplorer ArrayCharacterization directory (containing the `msxac`
+    binary, `sample_configs/`, and `sample_cells/`). Checked in order:
+      1. $MSX_AC_DIR
+      2. A few likely sibling layouts relative to this file.
+    (Analogous to _get_cacti_dir)
+    """
+    env = os.environ.get("MSX_AC_DIR")
+    if env and os.path.isdir(env):
+        return os.path.abspath(env)
+    here = os.path.dirname(os.path.abspath(__file__))
+    to_try = [
+        os.path.join(here, "..", "..", "MemSysExplorer", "tech", "ArrayCharacterization"),
+        os.path.join(here, "..", "..", "..", "MemSysExplorer", "tech", "ArrayCharacterization"),
+        os.path.join(here, "..", "MemSysExplorer", "tech", "ArrayCharacterization"),
+    ]
+    for c in to_try:
+        if os.path.isdir(c):
+            return os.path.abspath(c)
+    raise FileNotFoundError(
+        "Could not locate MemSysExplorer's ArrayCharacterization directory. "
+        "Set the MSX_AC_DIR environment variable to point at it."
+    )
 
-class _DestinyMemory(ComponentModel):
+
+class _MSXACMemory(ComponentModel):
     """
-    Base class for memory models utilizing DESTINY.
+    Base class for memory models that call MemSysExplorer's ArrayCharacterization
+    tool (`msxac`, the NVSim/DESTINY-extended characterizer) instead of DESTINY.
+
+    DESTINY only supports 1T1C eDRAM cells, which is insufficient for modeling the
+    3T eDRAM / 333-eDRAM devices targeted by this plug-in. msxac natively supports
+    3T eDRAM cells with mixed-Vt, mixed-device-type peripherals / read path /
+    write path configurations.
+
+    The tool is invoked once per unique (cell, tech, capacity, ...) combination;
+    a tech YAML is written into a temp subdirectory of the AC dir and the result
+    YAML path is parsed out of msxac's stdout.
     """
+
     def __init__(
         self,
         tech_node: float,
         capacity_bytes: int,
         width_bits: int,
-        design_target: str = "RAM",
-        mem_cell_type: str = "eDRAM",
-        cell_area_f2: float = 33.1,
-        optimization_target: str = "WriteEDP",
-        additional_cfg: str = "",
-        additional_cell: str = ""
+        config_yaml: str,
     ):
-        self.tech_node = float(tech_node) * 1e9 # nm
+        self.tech_node = float(tech_node) * 1e9  # nm
         self.capacity_bytes = capacity_bytes
         self.width_bits = width_bits
-        self.design_target = design_target
-        self.mem_cell_type = mem_cell_type
-        self.cell_area_f2 = cell_area_f2
-        self.optimization_target = optimization_target
-        self.additional_cfg = additional_cfg
-        self.additional_cell = additional_cell
-        
+        self.config_yaml = config_yaml
         self.read_energy: float = None
         self.write_energy: float = None
         self.destiny_leak_power: float = None
         self.destiny_area: float = None
         self.read_latency: float = None
         self.write_latency: float = None
-        
-        self._called_destiny = False
-        self._call_destiny()
-        
+
+        self._called_msxac = False
+        self._call_msxac()
+
         self._customize_destiny_outputs()
 
         super().__init__(area=self.destiny_area, leak_power=self.destiny_leak_power)
 
     def _customize_destiny_outputs(self):
+        """Hook for subclasses to tweak msxac outputs (e.g., monolithic 3D scaling)."""
         pass
 
-    def _call_destiny(self):
-        if self._called_destiny:
+    def _call_msxac(self):
+        if self._called_msxac:
             return
-        self._called_destiny = True
-        
-        sn = min(max(int(self.tech_node), 22), 130)
-        capacity_kb = max(self.capacity_bytes / 1024, 1)
-        
-        cfg_content = f"""
--CacheAccessMode: Normal
--Associativity (for cache only): 8
+        self._called_msxac = True
 
--DesignTarget: {self.design_target}
--ProcessNode: {sn}
--Capacity (KB): {int(capacity_kb)}
--WordWidth (bit): {self.width_bits}
+        ac_dir = _get_msxac_dir(self.logger)
+        msxac_exec = os.path.join(ac_dir, "msxac")
+        if not os.path.exists(msxac_exec):
+            raise FileNotFoundError(
+                f"msxac binary not found at {msxac_exec}. Build it with `make` in the "
+                f"MemSysExplorer ArrayCharacterization directory, or set MSX_AC_DIR."
+            )
 
--DeviceRoadmap: HP
+        # Pick capacity unit that msxac accepts (KB or MB).
+        capacity_kb = max(self.capacity_bytes // 1024, 1)
+        if capacity_kb >= 1024 and capacity_kb % 1024 == 0:
+            cap_value = int(capacity_kb // 1024)
+            cap_unit = "MB"
+        else:
+            cap_value = int(capacity_kb)
+            cap_unit = "KB"
 
--LocalWireType: LocalAggressive
--LocalWireRepeaterType: RepeatedNone
--LocalWireUseLowSwing: No
+        tmp_dir = os.path.join(ac_dir, "hwc_tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
 
--GlobalWireType: GlobalAggressive
--GlobalWireRepeaterType: RepeatedNone
--GlobalWireUseLowSwing: No
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        template_yaml_path = os.path.join(base_dir, self.config_yaml)
 
--Routing: H-tree
+        input_name = os.path.splitext(os.path.basename(template_yaml_path))[0]
+        tech_yaml_path = os.path.join(tmp_dir, input_name + ".yaml")
+        log_path = os.path.join(tmp_dir, input_name + "_msxac.log")
+        shutil.copy2(template_yaml_path, tech_yaml_path)
 
--InternalSensing: true
+        with open(tech_yaml_path, "a") as f:
+            f.write(f"\nCapacity:\n  Value: {cap_value}\n  Unit: {cap_unit}\n")
 
--MemoryCellInputFile: temp_destiny.cell
+        self.logger.info(f"Running msxac on {tech_yaml_path}")
 
--Temperature (K): 300
--RetentionTime (us): 40
-
--OptimizationTarget: WriteEDP
-
--EnablePruning: Yes
-
--BufferDesignOptimization: latency
-
--StackedDieCount: 1
-{self.additional_cfg}
-"""
-        
-        cell_content = f"""
--MemCellType: {self.mem_cell_type}
--CellArea (F^2): {self.cell_area_f2}
-
--CellAspectRatio: 2.39
-
--ReadMode: voltage
-
--CellAspectRatio: 2.39
-
--ReadMode: voltage
-
--AccessType: CMOS
--AccessCMOSWidth (F): 1.31
-
-// value from paper
--DRAMCellCapacitance (F): 180e-18
--ResetVoltage (V): vdd
--SetVoltage (V): vdd
-
--MinSenseVoltage (mV): 10
-"""
-        temp_dir = _clean_tmp_dir()
-        input_name = hashlib.sha256((cfg_content + cell_content).encode()).hexdigest()
-        
-        cfg_path = os.path.join(temp_dir, input_name + ".cfg")
-        cell_path = os.path.join(temp_dir, "temp_destiny.cell")
-        out_path = os.path.join(temp_dir, input_name + "_out.log")
-        
         try:
-            with open(cfg_path, "w") as f:
-                f.write(cfg_content.strip() + "\n")
-            with open(cell_path, "w") as f:
-                f.write(cell_content.strip() + "\n")
-                
-            destiny_dir = os.path.join(os.path.dirname(__file__), "destiny_3d_cache")
-            destiny_exec = os.path.join(destiny_dir, "destiny")
-            
-            self.logger.info(f"Running DESTINY: {destiny_exec} {input_name}.cfg")
-            
-            with open(out_path, "w") as out:
-                result = subprocess.call(
-                    [destiny_exec, input_name + ".cfg"],
-                    cwd=temp_dir,
+            with open(log_path, "w") as out:
+                rc = subprocess.call(
+                    ["./msxac", tech_yaml_path],
+                    cwd=ac_dir,
                     stdout=out,
-                    stderr=subprocess.STDOUT
+                    stderr=subprocess.STDOUT,
                 )
-            
-            if not os.path.exists(out_path):
-                raise Exception("DESTINY output file not found")
-                
-            with open(out_path, "r") as out:
-                output_str = out.read()
-                
-            area_m = re.search(r"-\s*Total Area\s*=\s*([0-9.]+)(mm\^2|um\^2)", output_str)
+            with open(log_path, "r") as out:
+                stdout = out.read()
+
+            # msxac prints its results directly to stdout (no separate YAML file is
+            # emitted). Parse the human-readable summary the same way the DESTINY
+            # path below does. If a field is missing, leave it at 0.0 rather than
+            # crashing the whole pipeline.
+            if rc != 0:
+                raise Exception(
+                    f"msxac exited with rc={rc}. See {log_path} for full output."
+                )
+
+            area_m = re.search(r"-\s*Total Area\s*=\s*([0-9.]+)(mm\^2|um\^2)", stdout)
             if area_m:
                 val = float(area_m.group(1))
                 unit = area_m.group(2)
                 self.destiny_area = val * 1e-6 if unit == "mm^2" else val * 1e-12
             else:
-                self.destiny_area = 0
-            
-            rlat_m = re.search(r"-\s*(?:Cache Hit|Read) Latency\s*=\s*([0-9.]+)(ns|ps)", output_str)
+                self.destiny_area = 0.0
+
+            rlat_m = re.search(r"-\s*(?:Cache Hit|Read) Latency\s*=\s*([0-9.]+)(ns|ps)", stdout)
             if rlat_m:
                 val = float(rlat_m.group(1))
                 unit = rlat_m.group(2)
                 self.read_latency = val * 1e-9 if unit == "ns" else val * 1e-12
             else:
-                self.read_latency = 0
-                
-            wlat_m = re.search(r"-\s*(?:Cache Write|Write) Latency\s*=\s*([0-9.]+)(ns|ps)", output_str)
+                self.read_latency = 0.0
+
+            wlat_m = re.search(r"-\s*(?:Cache Write|Write) Latency\s*=\s*([0-9.]+)(ns|ps)", stdout)
             if wlat_m:
                 val = float(wlat_m.group(1))
                 unit = wlat_m.group(2)
                 self.write_latency = val * 1e-9 if unit == "ns" else val * 1e-12
             else:
-                self.write_latency = 0
-                
-            reng_m = re.search(r"-\s*(?:Cache Hit|Read) Dynamic Energy\s*=\s*([0-9.]+)(nJ|pJ)", output_str)
+                self.write_latency = 0.0
+
+            reng_m = re.search(r"-\s*(?:Cache Hit|Read) Dynamic Energy\s*=\s*([0-9.]+)(nJ|pJ)", stdout)
             if reng_m:
                 val = float(reng_m.group(1))
                 unit = reng_m.group(2)
                 self.read_energy = val * 1e-9 if unit == "nJ" else val * 1e-12
             else:
-                self.read_energy = 0
-                
-            weng_m = re.search(r"-\s*(?:Cache Write|Write) Dynamic Energy\s*=\s*([0-9.]+)(nJ|pJ)", output_str)
+                self.read_energy = 0.0
+
+            weng_m = re.search(r"-\s*(?:Cache Write|Write) Dynamic Energy\s*=\s*([0-9.]+)(nJ|pJ)", stdout)
             if weng_m:
                 val = float(weng_m.group(1))
                 unit = weng_m.group(2)
                 self.write_energy = val * 1e-9 if unit == "nJ" else val * 1e-12
             else:
-                self.write_energy = 0
-                
-            leak_m = re.search(r"-\s*(?:Cache Total |)Leakage Power\s*=\s*([0-9.]+)(mW|uW)", output_str)
+                self.write_energy = 0.0
+
+            leak_m = re.search(r"-\s*(?:Cache Total |)Leakage Power\s*=\s*([0-9.]+)(mW|uW)", stdout)
             if leak_m:
                 val = float(leak_m.group(1))
                 unit = leak_m.group(2)
                 self.destiny_leak_power = val * 1e-3 if unit == "mW" else val * 1e-6
             else:
-                self.destiny_leak_power = 0
+                self.destiny_leak_power = 0.0
 
-            self.logger.info(f"DESTINY returned read lat {self.read_latency}, write lat {self.write_latency}")
-            self.logger.info(f"DESTINY returned read eng {self.read_energy}, write eng {self.write_energy}")
-            self.logger.info(f"DESTINY returned leak {self.destiny_leak_power}, area {self.destiny_area}")
-            
+            self.logger.info(
+                f"msxac returned area={self.destiny_area} m^2, "
+                f"read_lat={self.read_latency}s, write_lat={self.write_latency}s, "
+                f"read_eng={self.read_energy}J, write_eng={self.write_energy}J, "
+                f"leak={self.destiny_leak_power}W"
+            )
+
         except Exception as e:
-            self.logger.warning(f"Error calling DESTINY: {e}")
+            self.logger.warning(f"Error calling msxac: {e}")
+            for attr in (
+                "read_energy",
+                "write_energy",
+                "destiny_leak_power",
+                "destiny_area",
+                "read_latency",
+                "write_latency",
+            ):
+                if getattr(self, attr) is None:
+                    setattr(self, attr, 0.0)
 
-class _DRAM(_DestinyMemory):
+class EDRAM_1T1C_Cache(_MSXACMemory):
+    """
+    1T1C eDRAM cache modelled via MemSysExplorer's msxac (NVSim-extended).
+    """
+    component_name = ["EDRAM_1T1C_Cache", "1T1C_eDRAM"]
     priority = 0.3
 
-    def __init__(
-        self,
-        size: int,
-        width: int = 128,
-        type: str = "DRAM",
-        tech_node: float = 22e-9
-    ):
+    def __init__(self, size: int, width: int = 128, tech_node: float = 28e-9):
         capacity_bytes = size // 8
+
         super().__init__(
             tech_node=tech_node,
             capacity_bytes=capacity_bytes,
             width_bits=width,
-            design_target="RAM",
-            mem_cell_type="DRAM",
-            cell_area_f2=6.0,
-            optimization_target="ReadLatency"
+            config_yaml="1t1ceDRAM.yaml",
         )
-        self.type = type
         self.width = width
 
     @action(bits_per_action="width")
@@ -268,66 +261,37 @@ class _DRAM(_DestinyMemory):
     def write(self) -> tuple[float, float]:
         return self.write_energy, self.write_latency
 
-class LPDDR4(_DRAM):
-    component_name = ["DRAMLPDDR4", "DRAM_LPDDR4", "LPDDR4"]
-    def __init__(self, size: int, width: int = 64):
-        super().__init__(size=size, width=width, type="LPDDR4", tech_node=14e-9)
-    def _customize_destiny_outputs(self):
-        self.read_energy = 8 * 1e-12 * self.width_bits
-        self.write_energy = self.read_energy
-        self.read_latency = 1.0 / (50 * 1024 * 1024)
-        self.write_latency = self.read_latency
+class EDRAM_333_Cache(_MSXACMemory):
+    """
+    333-eDRAM cache (monolithic 3D integration of 3 transistor types: 7nm LOP Si
+    peripherals, 22nm CNFET read path, 45nm IGZO write path) modelled via msxac.
 
-class LPDDR(_DRAM):
-    component_name = ["DRAMLPDDR", "DRAM_LPDDR", "LPDDR"]
-    def __init__(self, size: int, width: int = 64):
-        super().__init__(size=size, width=width, type="LPDDR", tech_node=22e-9)
-    def _customize_destiny_outputs(self):
-        self.read_energy = 40 * 1e-12 * self.width_bits
-        self.write_energy = self.read_energy
-        self.read_latency = 1.0 / (6.25 * 1024 * 1024)
-        self.write_latency = self.read_latency
+    The 333-eDRAM cell parameters are taken from MemSysExplorer's calibrated
+    sample_cells/sample_edram3t_333/. Because msxac natively handles the mixed
+    device stack (via ProcessNodeR/W + DeviceRoadmapR/W), we no longer need the
+    post-hoc Table III scaling that the DESTINY-based version applied.
+    """
+    component_name = ["EDRAM_333_Cache", "333_EDRAM_Cache"]
+    priority = 0.3
 
-class DDR3(_DRAM):
-    component_name = ["DRAMDDR3", "DRAM_DDR3", "DDR3"]
-    def __init__(self, size: int, width: int = 64):
-        super().__init__(size=size, width=width, type="DDR3", tech_node=22e-9)
-    def _customize_destiny_outputs(self):
-        self.read_energy = 70 * 1e-12 * self.width_bits
-        self.write_energy = self.read_energy
-        self.read_latency = 1.0 / (33.3 * 1024 * 1024)
-        self.write_latency = self.read_latency
+    def __init__(self, size: int, width: int = 128, tech_node: float = 28e-9):
+        capacity_bytes = size // 8
 
-class HBM2(_DRAM):
-    component_name = ["DRAMHBM2", "DRAM_HBM2", "HBM2"]
-    def __init__(self, size: int, width: int = 2048):
-        super().__init__(size=size, width=width, type="HBM2", tech_node=14e-9)
-    def _customize_destiny_outputs(self):
-        self.read_energy = 6.25 * 1e-12 * self.width_bits
-        self.write_energy = self.read_energy
-        self.read_latency = 1.0 / (2.4 * 1024 * 1024 * 1024)
-        self.write_latency = self.read_latency
+        super().__init__(
+            tech_node=tech_node,
+            capacity_bytes=capacity_bytes,
+            width_bits=width,
+            config_yaml="333eDRAM.yaml",
+        )
+        self.width = width
 
-class HBM3(_DRAM):
-    component_name = ["DRAMHBM3", "DRAM_HBM3", "HBM3"]
-    def __init__(self, size: int, width: int = 2048):
-        super().__init__(size=size, width=width, type="HBM3", tech_node=14e-9)
-    def _customize_destiny_outputs(self):
-        self.read_energy = 4.05 * 1e-12 * self.width_bits
-        self.write_energy = self.read_energy
-        self.read_latency = 1.0 / (6.4 * 8 * 1024 * 1024 * 1024)
-        self.write_latency = self.read_latency
+    @action(bits_per_action="width")
+    def read(self) -> tuple[float, float]:
+        return self.read_energy, self.read_latency
 
-class HBM4(_DRAM):
-    component_name = ["DRAMHBM4", "DRAM_HBM4", "HBM4"]
-    def __init__(self, size: int, width: int = 4096):
-        super().__init__(size=size, width=width, type="HBM4", tech_node=7e-9)
-    def _customize_destiny_outputs(self):
-        self.read_energy = 3.2 * 1e-12 * self.width_bits
-        self.write_energy = self.read_energy
-        self.read_latency = 1.0 / (8 * 8 * 1024 * 1024 * 1024)
-        self.write_latency = self.read_latency
-
+    @action(bits_per_action="width")
+    def write(self) -> tuple[float, float]:
+        return self.write_energy, self.write_latency
 
 
 def _interp_call(
@@ -845,65 +809,244 @@ class Cache(_Memory):
         self._interpolate_and_call_cacti()
         return self.write_energy, self._get_latency_per_bit() * self.width
 
-class EDRAM_3DCache(_DestinyMemory):
-    component_name = ["EDRAM_3DCache", "3D_eDRAM"]
-    priority = 0.8
+class _DRAM(ComponentModel):
+    """
 
-    def __init__(self, size: int, width: int = 128, tech_node: float = 32e-9):
-        capacity_bytes = size // 8
+    DRAM model using a simple joules-per-bit energy. Assumes that leak power and area
+    are both zero.
 
-        super().__init__(
-            tech_node=tech_node,
-            capacity_bytes=capacity_bytes,
-            width_bits=width,
-            design_target="cache",
-            mem_cell_type="eDRAM",
-            cell_area_f2=837,
-            optimization_target="WriteEDP"
-        )
-        self.width = width
+    Args:
+        width: The width of the DRAM bus in bits.
+        type: The type of DRAM.
+
+    Attributes:
+        width: The width of the DRAM bus in bits.
+        type: The type of DRAM.
+    """
+
+    priority = 0.3
+    type2energylatency = {
+        # "LPDDR5": (None, 100*1024*1024), # , https://en.wikipedia.org/wiki/LPDDR
+        # Public data
+        # https://en.wikipedia.org/wiki/LPDDR
+        "LPDDR4": (8, 50 * 1024 * 1024),
+        # Malladi et al. ISCA'12
+        # https://en.wikipedia.org/wiki/LPDDR
+        "LPDDR": (40, 6.25 * 1024 * 1024),
+        # Chatterjee et al. MICRO'17
+        # https://en.wikipedia.org/wiki/DDR3_SDRAM
+        "DDR3": (70, 33.3 * 1024 * 1024),
+        # https://www.lovechip.com/blog/hbm-high-bandwidth-memory-concept-architecture-and-application
+        # https://en.wikipedia.org/wiki/High_Bandwidth_Memory
+        "HBM": (1.0 * 1024 * 1024 * 1024),
+        # https://eureka.patsnap.com/insight/the-hbm-wars-sk-hynixs-dominance-samsungs-roadmap-and-the-looming-threat-of-cyclicality
+        # https://en.wikipedia.org/wiki/High_Bandwidth_Memory
+        "HBM2": (6.25, 2.4 * 1024 * 1024 * 1024),
+        # https://eureka.patsnap.com/insight/the-hbm-wars-sk-hynixs-dominance-samsungs-roadmap-and-the-looming-threat-of-cyclicality
+        # https://en.wikipedia.org/wiki/High_Bandwidth_Memory
+        "HBM3": (4.05, 6.4 * 8 * 1024 * 1024 * 1024),
+        # https://eureka.patsnap.com/report-hbm4-bandwidth-density-and-efficiency-metrics-in-multi-die-packages
+        # https://en.wikipedia.org/wiki/High_Bandwidth_Memory
+        # 20% reduction from HBM3
+        "HBM4": (3.2, 8 * 8 * 1024 * 1024 * 1024),
+    }
+
+    def __init__(
+        self,
+        width: int,
+        type: str = None,
+    ):
+        super().__init__(area=0, leak_power=0)
+        if type is None:
+            raise ValueError(
+                "DRAM type is required. Must be one of "
+                + ", ".join(self.type2energylatency.keys())
+                + "."
+            )
+        if type not in self.type2energylatency:
+            raise ValueError(
+                "DRAM type "
+                + type
+                + " is not supported. Must be one of "
+                + ", ".join(self.type2energylatency.keys())
+                + "."
+            )
+
+        self.type = type
+        self.energy, self.throughput = self.type2energylatency[type]
+        self.width = self.assert_int("width", width)
+        self.latency = 1 / self.throughput
+
+        if type in ["LPDDR4", "LPDDR", "DDR3"]:
+            assert (
+                width <= 64
+            ), f"Width is too large for {type}. Must be less than or equal to 64."
+
+        if type in ["HBM2", "HBM3"]:
+            assert (
+                width >= 1024
+            ), f"Width is too small for {type}. Must be greater than or equal to 1024."
+
+        if type in ["HBM4"]:
+            assert (
+                width >= 2048
+            ), f"Width is too small for {type}. Must be greater than or equal to 2048."
 
     @action(bits_per_action="width")
     def read(self) -> tuple[float, float]:
-        return self.read_energy, self.read_latency
+        """
+        Returns the energy and latency for one DRAM read.
+
+        Args:
+            bits_per_action: The number of bits to read.
+
+        Returns:
+            (energy, latency): Tuple in (Joules, seconds).
+        """
+        return self.energy * 1e-12 * self.width, self.latency
 
     @action(bits_per_action="width")
     def write(self) -> tuple[float, float]:
-        return self.write_energy, self.write_latency
+        """
+        Returns the energy and latency for one DRAM write.
 
-class EDRAM_333_Cache(_DestinyMemory):
-    component_name = ["EDRAM333_Cache", "333EDRAM_Cache"]
-    priority = 0.9
+        Args:
+            bits_per_action: The number of bits to write.
 
-    def __init__(self, size: int, width: int = 128, tech_node: float = 7e-9):
-        capacity_bytes = size // 8
+        Returns:
+            (energy, latency): Tuple in (Joules, seconds).
+        """
+        return self.read()
 
-        # Standard Si-eDRAM baseline
 
-        super().__init__(
-            tech_node=tech_node,
-            capacity_bytes=capacity_bytes,
-            width_bits=width,
-            design_target="cache",             
-            mem_cell_type="eDRAM",
-            cell_area_f2=388,                 
-            optimization_target="WriteEDP",
-            additional_cfg="-MonolithicStackCount:3"
-        )
-        self.width = width
+class LPDDR4(_DRAM):
+    """
+    LPDDR4 DRAM model using a simple joules-per-bit energy. Assumes that leak power and
+    area are both zero.
 
-    @action(bits_per_action="width")
-    def read(self) -> tuple[float, float]:
-        return self.read_energy, self.read_latency
+    Parameters
+    ----------
+    width: int
+        The width of the DRAM bus in bits.
 
-    @action(bits_per_action="width")
-    def write(self) -> tuple[float, float]:
-        return self.write_energy, self.write_latency
+    Attributes
+    ----------
+    width: int
+        The width of the DRAM bus in bits.
+    type: str
+        The type of DRAM.
+    """
 
-    def _customize_destiny_outputs(self):
-        # 333-eDRAM Monolithic 3D Scaling Math (from Table III)
-        self.read_latency *= (489.0 / 793.0)
-        self.write_latency *= (251.0 / 328.0)
-        self.read_energy *= (13.6 / 21.3)
-        self.write_energy *= (13.6 / 21.3)
-        self.destiny_leak_power *= (51.3 / 501.0)
+    component_name = ["DRAMLPDDR4", "DRAM_LPDDR4", "LPDDR4"]
+
+    def __init__(self, width: int = 64):
+        super().__init__(width=width, type="LPDDR4")
+
+
+class LPDDR(_DRAM):
+    """
+    LPDDR DRAM model using a simple joules-per-bit energy. Assumes that leak power and
+    area are both zero.
+
+    Parameters
+    ----------
+    width: int
+        The width of the DRAM bus in bits.
+
+    Attributes
+    ----------
+    width: int
+        The width of the DRAM bus in bits.
+    type: str
+        The type of DRAM.
+    """
+
+    component_name = ["DRAMLPDDR", "DRAM_LPDDR", "LPDDR"]
+
+    def __init__(self, width: int = 64):
+        super().__init__(width=width, type="LPDDR")
+
+
+class DDR3(_DRAM):
+    """
+    DDR3 DRAM model using a simple joules-per-bit energy. Assumes that leak power and
+    area are both zero.
+
+    Parameters
+    ----------
+    width: int
+        The width of the DRAM bus in bits.
+
+    Attributes
+    ----------
+    width: int
+        The width of the DRAM bus in bits.
+    type: str
+        The type of DRAM.
+    """
+
+    component_name = ["DRAMDDR3", "DRAM_DDR3", "DDR3"]
+
+    def __init__(self, width: int = 64):
+        super().__init__(width=width, type="DDR3")
+
+
+class HBM2(_DRAM):
+    """
+    HBM2 DRAM model using a simple joules-per-bit energy. Assumes that leak power and
+    area are both zero.
+
+    Parameters
+    ----------
+    width: int
+        The width of the DRAM bus in bits.
+
+    Attributes
+    ----------
+    width: int
+        The width of the DRAM bus in bits. Default of 2048 assumes 2 stacks of 1024 pins
+        each.
+    type: str
+        The type of DRAM.
+    """
+
+    component_name = ["DRAMHBM2", "DRAM_HBM2", "HBM2"]
+
+    def __init__(self, width: int = 2048):
+        super().__init__(width=width, type="HBM2")
+
+
+class HBM3(_DRAM):
+    """
+    HBM3 DRAM model using a simple joules-per-bit energy. Assumes that leak power and
+    area are both zero.
+
+    Parameters
+    ----------
+    width: int
+        The width of the DRAM bus in bits. Default of 2048 assumes 2 stacks of 1024 pins
+        each.
+    """
+
+    component_name = ["DRAMHBM3", "DRAM_HBM3", "HBM3"]
+
+    def __init__(self, width: int = 2048):
+        super().__init__(width=width, type="HBM3")
+
+
+class HBM4(_DRAM):
+    """
+    HBM4 DRAM model using a simple joules-per-bit energy. Assumes that leak power and
+    area are both zero.
+
+    Parameters
+    ----------
+    width: int
+        The width of the DRAM bus in bits. Default of 4096 assumes 2 stacks of 2048 pins
+        each.
+    """
+
+    component_name = ["DRAMHBM4", "DRAM_HBM4", "HBM4"]
+
+    def __init__(self, width: int = 4096):
+        super().__init__(width=width, type="HBM4")
