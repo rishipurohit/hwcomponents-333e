@@ -1,10 +1,9 @@
-
 !Memory
-name: Baseline3DGlobalBuffer
-component_class: EDRAM_1T1C_Cache
-size: 1048576  # 128 KB
-extra_attributes_for_component_model:
-  width: 128
+name: SRAMGlobalBuffer
+size: 1024*1024*128*8 # 128MB
+total_latency: max(read_latency, write_latency) # Separate ports
+leak_power: 5.6
+area: 112e-6 # From paper fig. 6
 actions:
-  - { name: read, bits_per_action: 128 }
-  - { name: write, bits_per_action: 128 }
+- {name: read, energy: 1.88e-12, latency: 6.1035e-14}
+- {name: write, energy: 2.36e-12, latency: 1.221e-13}

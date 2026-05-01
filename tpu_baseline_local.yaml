@@ -36,6 +36,9 @@ arch:
     spatial: [{name: Z, fanout: 4, may_reuse: Nothing, min_usage: 1}]
     size: 1024*1024*4*8 # 4MB
     component_class: EDRAM_1T1C_Cache
+    actions:
+      - { name: read, bits_per_action: 128 }
+      - { name: write, bits_per_action: 128 }
     tensors: {keep: input | output}
 
   - !Compute

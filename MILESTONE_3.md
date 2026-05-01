@@ -15,7 +15,6 @@ It's important to note that MemSysExplorer is actually built on top of DESTINY, 
 ## Experiment 1: Testing Global vs Local vs Both
 
 Note: we haven't made graphs for any of the experiments yet.
-
 ```
 
 tpu_333_both.yaml
@@ -85,3 +84,9 @@ Latency: 0.0004377065525149604s, 1.6289683377593481e-12s/compute
 ## Experiment 2: Increasing Sequence Length
 
 Qualitatively, we see the expected scaling with sequence length. As sequence length increases, the amount of off-chip memory traffic increases to fetch the input and weights. We also see that the 333-eDRAM configuration scales better than the baseline, with 333-eDRAM improving as sequence length increases (as expected, since 333-eDRAM has better area, latency, and leakage power).
+
+We had to change the latency of SRAM because in the TPU, it was simplistically set to 0, which didn't make sense.
+
+# Experiment 3: Fusion
+
+Work in progress

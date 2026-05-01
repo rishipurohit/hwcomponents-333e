@@ -22,8 +22,11 @@ arch:
 
   - !Memory
     name: GlobalBuffer
-    size: 8589934592 # 128MB
+    size: 4294967296 # 128MB
     component_class: EDRAM_333_Cache
+    actions:
+      - { name: read, bits_per_action: 128 }
+      - { name: write, bits_per_action: 128 }
     total_latency: max(read_latency, write_latency)
     tensors: {keep: ~MainMemory.tensors, may_keep: All}
 
@@ -31,11 +34,11 @@ arch:
     name: LocalBuffer
     spatial: [{name: Z, fanout: 4, may_reuse: Nothing, min_usage: 1}]
     size: 1024*1024*4*8 # 4MB
-    leak_power: 0
+    leak_power: 2.55
     area: 51e-6 # From paper fig. 6
     actions:
-    - {name: read, energy: 0.249e-12, latency: 0}
-    - {name: write, energy: 0.293e-12, latency: 0}
+    - {name: read, energy: 0.249e-12, latency: 1 / (8 * 1024e9) }
+    - {name: write, energy: 0.293e-12, latency: 1 / (8 * 512e9) }
     tensors: {keep: input | output}
 
   - !Compute

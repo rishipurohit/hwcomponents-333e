@@ -24,7 +24,7 @@ arch:
     name: GlobalBuffer
     size: 1024*1024*128*8 # 128MB
     total_latency: max(read_latency, write_latency) # Separate ports
-    leak_power: 0
+    leak_power: 5.6
     area: 112e-6 # From paper fig. 6
     actions:
     - {name: read, energy: 1.88e-12, latency: 1 / (8 * 2048e9)}
@@ -36,6 +36,9 @@ arch:
     spatial: [{name: Z, fanout: 4, may_reuse: Nothing, min_usage: 1}]
     size: 268435456 # 4MB
     component_class: EDRAM_333_Cache
+    actions:
+      - { name: read, bits_per_action: 128 }
+      - { name: write, bits_per_action: 128 }
     tensors: {keep: input | output}
 
   - !Compute

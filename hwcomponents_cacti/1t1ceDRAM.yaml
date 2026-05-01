@@ -1,6 +1,6 @@
 MemoryCellInputFile: sample_cells/sample_edram1ts/sample_eDRAM1T_22nm_cell.yaml
 
-ProcessNode: 22
+ProcessNode: 7
 DeviceRoadmap: LOP
 
 DesignTarget: cache

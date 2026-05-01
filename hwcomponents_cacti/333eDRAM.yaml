@@ -1,6 +1,6 @@
 MemoryCellInputFile: sample_cells/sample_edram3t_333/sample_eDRAM3T_333eDRAM_cell.yaml
 
-ProcessNode: 22
+ProcessNode: 7
 DeviceRoadmap: LOP
 
 ProcessNodeR: 22
@@ -14,7 +14,7 @@ DesignTarget: cache
 CacheAccessMode: Normal
 Associativity: 8  # for cache only
 
-OptimizationTarget: ReadDynamicEnergy
+OptimizationTarget: ReadEDP
 
 OutputFilePrefix: test
 EnablePruning: Yes

@@ -85,29 +85,37 @@ class _MSXACMemory(ComponentModel):
         tech_node: float,
         capacity_bytes: int,
         width_bits: int,
+        n_rw_ports: int,
         config_yaml: str,
     ):
-        self.tech_node = float(tech_node) * 1e9  # nm
+        self.tech_node = tech_node * 1e9 # nm
         self.capacity_bytes = capacity_bytes
         self.width_bits = width_bits
+        self.n_rw_ports = n_rw_ports
         self.config_yaml = config_yaml
         self.read_energy: float = None
         self.write_energy: float = None
-        self.destiny_leak_power: float = None
-        self.destiny_area: float = None
+        self.msxac_leak_power: float = None
+        self.msxac_area: float = None
         self.read_latency: float = None
         self.write_latency: float = None
 
         self._called_msxac = False
         self._call_msxac()
 
-        self._customize_destiny_outputs()
+        self._customize_tool_outputs()
 
-        super().__init__(area=self.destiny_area, leak_power=self.destiny_leak_power)
+        super().__init__(area=self.msxac_area, leak_power=self.msxac_leak_power)
 
-    def _customize_destiny_outputs(self):
-        """Hook for subclasses to tweak msxac outputs (e.g., monolithic 3D scaling)."""
+    def _customize_tool_outputs(self):
+        """Hook for subclasses to tweak msxac tool outputs (e.g., monolithic 3D scaling)."""
         pass
+
+    def _get_read_latency_per_bit(self) -> float:
+        return self.read_latency / (self.width_bits * self.n_rw_ports * self.n_banks)
+
+    def _get_write_latency_per_bit(self) -> float:
+        return self.write_latency / (self.width_bits * self.n_rw_ports * self.n_banks)
 
     def _call_msxac(self):
         if self._called_msxac:
@@ -171,9 +179,9 @@ class _MSXACMemory(ComponentModel):
             if area_m:
                 val = float(area_m.group(1))
                 unit = area_m.group(2)
-                self.destiny_area = val * 1e-6 if unit == "mm^2" else val * 1e-12
+                self.msxac_area = val * 1e-6 if unit == "mm^2" else val * 1e-12
             else:
-                self.destiny_area = 0.0
+                self.msxac_area = 0.0
 
             rlat_m = re.search(r"-\s*(?:Cache Hit|Read) Latency\s*=\s*([0-9.]+)(ns|ps)", stdout)
             if rlat_m:
@@ -211,15 +219,26 @@ class _MSXACMemory(ComponentModel):
             if leak_m:
                 val = float(leak_m.group(1))
                 unit = leak_m.group(2)
-                self.destiny_leak_power = val * 1e-3 if unit == "mW" else val * 1e-6
+                self.msxac_leak_power = val * 1e-3 if unit == "mW" else val * 1e-6
             else:
-                self.destiny_leak_power = 0.0
+                self.msxac_leak_power = 0.0
+
+            bank_m = re.search(r"Bank Organization:\s*(\d+)\s*x\s*(\d+)", stdout)
+            if bank_m:
+                banks_x = int(bank_m.group(1))
+                banks_y = int(bank_m.group(2))
+                self.n_banks = banks_x * banks_y
+            else:
+                self.n_banks = 1
 
             self.logger.info(
-                f"msxac returned area={self.destiny_area} m^2, "
+                f"msxac returned area={self.msxac_area} m^2, "
                 f"read_lat={self.read_latency}s, write_lat={self.write_latency}s, "
                 f"read_eng={self.read_energy}J, write_eng={self.write_energy}J, "
-                f"leak={self.destiny_leak_power}W"
+                f"leak={self.msxac_leak_power}W, "
+                f"banks={self.n_banks}, "
+                f"width_bits={self.width_bits}, "
+                f"n_rw_ports={self.n_rw_ports}"
             )
 
         except Exception as e:
@@ -227,8 +246,8 @@ class _MSXACMemory(ComponentModel):
             for attr in (
                 "read_energy",
                 "write_energy",
-                "destiny_leak_power",
-                "destiny_area",
+                "leak_power",
+                "area",
                 "read_latency",
                 "write_latency",
             ):
@@ -242,11 +261,11 @@ class EDRAM_1T1C_Cache(_MSXACMemory):
     component_name = ["EDRAM_1T1C_Cache", "1T1C_eDRAM"]
     priority = 0.3
 
-    def __init__(self, size: int, width: int = 128, tech_node: float = 28e-9):
+    def __init__(self, size: int, width: int = 128):
         capacity_bytes = size // 8
 
         super().__init__(
-            tech_node=tech_node,
+            tech_node=7e-9,
             capacity_bytes=capacity_bytes,
             width_bits=width,
             config_yaml="1t1ceDRAM.yaml",
@@ -255,11 +274,11 @@ class EDRAM_1T1C_Cache(_MSXACMemory):
 
     @action(bits_per_action="width")
     def read(self) -> tuple[float, float]:
-        return self.read_energy, self.read_latency
+        return self.read_energy, self._get_read_latency_per_bit() * self.width
 
     @action(bits_per_action="width")
     def write(self) -> tuple[float, float]:
-        return self.write_energy, self.write_latency
+        return self.write_energy, self._get_write_latency_per_bit() * self.width
 
 class EDRAM_333_Cache(_MSXACMemory):
     """
@@ -274,24 +293,25 @@ class EDRAM_333_Cache(_MSXACMemory):
     component_name = ["EDRAM_333_Cache", "333_EDRAM_Cache"]
     priority = 0.3
 
-    def __init__(self, size: int, width: int = 128, tech_node: float = 28e-9):
+    def __init__(self, size: int, width: int = 128, n_rw_ports: int = 1):
         capacity_bytes = size // 8
 
         super().__init__(
-            tech_node=tech_node,
+            tech_node=7e-9,
             capacity_bytes=capacity_bytes,
             width_bits=width,
+            n_rw_ports=n_rw_ports,
             config_yaml="333eDRAM.yaml",
         )
         self.width = width
 
     @action(bits_per_action="width")
     def read(self) -> tuple[float, float]:
-        return self.read_energy, self.read_latency
+        return self.read_energy, self._get_read_latency_per_bit() * self.width
 
     @action(bits_per_action="width")
     def write(self) -> tuple[float, float]:
-        return self.write_energy, self.write_latency
+        return self.write_energy, self._get_write_latency_per_bit() * self.width
 
 
 def _interp_call(

@@ -24,7 +24,7 @@ arch:
     name: GlobalBuffer
     size: 1024*1024*128*8 # 128MB
     total_latency: max(read_latency, write_latency) # Separate ports
-    leak_power: 0
+    leak_power: 5.6
     area: 112e-6 # From paper fig. 6
     actions:
     - {name: read, energy: 1.88e-12, latency: 1 / (8 * 2048e9)}
@@ -35,11 +35,11 @@ arch:
     name: LocalBuffer
     spatial: [{name: Z, fanout: 4, may_reuse: Nothing, min_usage: 1}]
     size: 1024*1024*4*8 # 4MB
-    leak_power: 0
+    leak_power: 2.55
     area: 51e-6 # From paper fig. 6
     actions:
-    - {name: read, energy: 0.249e-12, latency: 0}
-    - {name: write, energy: 0.293e-12, latency: 0}
+    - {name: read, energy: 0.249e-12, latency: 1 / (8 * 1024e9) }
+    - {name: write, energy: 0.293e-12, latency: 1 / (8 * 512e9) }
     tensors: {keep: input | output}
 
   - !Compute
