@@ -1,29 +1,31 @@
-# HWComponents-Cacti
+# HWComponents-333e
 
-This model connects CACTI to the HWComponents. It provides models for SRAM, DRAM, and
-caches. This is adapted from the Accelergy CACTI plug-in.
+Rishi Purohit and Dandi Desta
 
-These models are for use with the HWComponents package, found at
-https://accelergy-project.github.io/hwcomponents/.
+This repo is a fork of the HWComponents-Cacti repo providing models for 333-eDRAM cells. The main notebook is available in `component_energy_area.ipynb`. This notebook was used to generate all data for the report.
 
-## Installation
-
-Install from PyPI:
-
-```bash
-pip install hwcomponents-cacti
-
-# Check that the installation is successful
-hwc --list | grep SRAM
-hwc --list | grep DRAM
-hwc --list | grep Cache
-```
+Figures were created through Excel; the file is `data.xlsx`.
 
 ## Citation
 
 If you use this library in your work, please cite the following:
 
 ```bibtex
+@inproceedings{kong2025333, title={333-eDRAM-3T
+Embedded DRAM Leveraging
+Monolithic 3D Integration of
+3 Transistor Types: IGZO, Carbon Nanotube and Silicon
+FETS},
+author={Kong, David and Prakash, Shvetank and Kufel, Jedrzej and Kyriazidis,
+Georgios and Omri, Yasmine and Verity, David and Ozer, Emre and Reddi, Vijay Janapa and Hills, Gage},
+booktitle={2025 62nd ACM/
+IEEE Design Automation
+Conference (DAC)},
+pages={1--7},
+year={2025},
+organization={IEEE}
+}
+
 @INPROCEEDINGS{cimloop,
   author={Andrulis, Tanner and Emer, Joel S. and Sze, Vivienne},
   booktitle={2024 IEEE International Symposium on Performance Analysis of Systems and Software (ISPASS)},
